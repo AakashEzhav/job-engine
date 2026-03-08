@@ -348,11 +348,4 @@ function detectRemoteType(text: string): string {
   return 'onsite'
 }
 
-function detectExperienceLevel(title: string, desc = ''): string {
-  const text = `${title} ${desc}`.toLowerCase()
-  if (/\b(staff|principal)\b/.test(text)) return 'staff'
-  if (/\b(lead|director)\b/.test(text)) return 'lead'
-  if (/\b(senior|sr\.?\s)\b/.test(text)) return 'senior'
-  if (/\b(junior|jr\.?\s|entry.?level)\b/.test(text)) return 'junior'
-  return 'mid'
-}
+

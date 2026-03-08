@@ -513,15 +513,6 @@ function detectRemoteType(text: string): string {
   return 'onsite'
 }
 
-function detectExperienceLevel(title: string, desc = ''): string {
-  const text = `${title} ${desc}`.toLowerCase()
-  if (/\b(staff|principal|distinguished)\b/.test(text)) return 'staff'
-  if (/\b(lead|head\s+of|director|vp\b)\b/.test(text)) return 'lead'
-  if (/\b(senior|sr\.?\s)\b/.test(text)) return 'senior'
-  if (/\b(junior|jr\.?\s|entry.?level|graduate|intern)\b/.test(text)) return 'junior'
-  return 'mid'
-}
-
 function detectCountryFromLocation(location: string): string | null {
   if (!location) return null
   const lower = location.toLowerCase()

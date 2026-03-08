@@ -706,7 +706,7 @@ export async function scrapeLinkedInRSS(): Promise<ScrapedJob[]> {
       const datePosted = pubDate ? new Date(pubDate).toISOString() : undefined
       if (datePosted) {
         const daysAgo = (Date.now() - new Date(datePosted).getTime()) / (1000 * 60 * 60 * 24)
-        if (daysAgo > 15) continue
+        if (daysAgo > 15) return
       }
 
       const expLevel = detectExperienceLevel(jobTitle, description)
