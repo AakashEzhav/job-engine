@@ -42,3 +42,4 @@ jobs:
           else
             echo "❌ Scrape failed at $(date)"
           fi
+
