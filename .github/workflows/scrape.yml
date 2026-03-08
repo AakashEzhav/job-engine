@@ -39,6 +39,7 @@ jobs:
         run: |
           if [ "${{ job.status }}" = "success" ]; then
             echo "✅ Scrape completed successfully at $(date)"
+            
           else
             echo "❌ Scrape failed at $(date)"
           fi
