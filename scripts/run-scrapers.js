@@ -6,7 +6,7 @@
 
 const https = require('https')
 
-const SITE_URL = process.env.NEXT_PUBLIC_APP_URL || process.env.VERCEL_URL
+const SITE_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.VERCEL_URL
 const CRON_SECRET = process.env.CRON_SECRET
 
 if (!SITE_URL || !CRON_SECRET) {
