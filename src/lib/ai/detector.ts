@@ -374,5 +374,5 @@ export function detectHiringSignals(text: string): {
   else if (launchScore === maxScore && launchScore > 0) { signalType = 'launch'; confidence = Math.min(0.75, launchScore * 0.25) }
   else if (hiringScore > 0) { signalType = 'hiring'; confidence = Math.min(0.90, hiringScore * 0.35) }
 
-  return { signalType, confidence, signals: [...new Set(signals)] }
+  return { signalType, confidence, signals: Array.from(new Set(signals)) }
 }
