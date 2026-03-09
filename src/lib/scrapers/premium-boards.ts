@@ -47,95 +47,94 @@ export async function scrapeAdzuna(): Promise<ScrapedJob[]> {
     return []
   }
 
-  // Countries with Adzuna country codes
   const countries: Array<{ code: string; name: string }> = [
     { code: 'us', name: 'USA' },
     { code: 'gb', name: 'United Kingdom' },
-    { code: 'au', name: 'Australia' },
     { code: 'ca', name: 'Canada' },
-    { code: 'de', name: 'Germany' },
-    { code: 'sg', name: 'Singapore' },
-    { code: 'nl', name: 'Netherlands' },
-    { code: 'nz', name: 'New Zealand' },
+    { code: 'au', name: 'Australia' },
   ]
 
-  const searchTerms = ['software engineer', 'developer', 'data scientist', 'devops', 'product manager']
+  const searchTerms = ['software engineer', 'developer']
 
-  for (const country of countries) {
-    for (const term of searchTerms.slice(0, 2)) { // Limit to stay within free tier
-      const url = `https://api.adzuna.com/v1/api/jobs/${country.code}/search/1?` +
-        `app_id=${appId}&app_key=${appKey}` +
-        `&results_per_page=20` +
-        `&what=${encodeURIComponent(term)}` +
-        `&sort_by=date` +
-        `&max_days_old=15` +
-        `&content-type=application/json`
+  // Run all requests in parallel to avoid timeout
+  const allRequests = countries.flatMap(country =>
+    searchTerms.map(term => ({ country, term }))
+  )
 
-      const data = await safeJsonFetch<any>(url)
-      if (!data?.results) continue
+  const responses = await Promise.all(allRequests.map(async ({ country, term }) => {
+    const url = `https://api.adzuna.com/v1/api/jobs/${country.code}/search/1?` +
+      `app_id=${appId}&app_key=${appKey}` +
+      `&results_per_page=50` +
+      `&what=${encodeURIComponent(term)}` +
+      `&sort_by=date` +
+      `&max_days_old=15` +
+      `&content-type=application/json`
+    const data = await safeJsonFetch<any>(url)
+    return { country, data }
+  }))
 
-      for (const item of data.results) {
-        const title = item.title || ''
-        const company = item.company?.display_name || 'Unknown'
-        const description = item.description || ''
-        const location = item.location?.display_name || ''
-        const salaryMin = item.salary_min
-        const salaryMax = item.salary_max
+  for (const { country, data } of responses) {
+    if (!data?.results) continue
 
-        const expLevel = detectExperienceLevel(title, description)
-        const visaProb = calculateVisaProbability(description, country.name)
+    for (const item of data.results) {
+      const title = item.title || ''
+      const company = item.company?.display_name || 'Unknown'
+      const description = item.description || ''
+      const location = item.location?.display_name || ''
+      const salaryMin = item.salary_min
+      const salaryMax = item.salary_max
 
-        let finalSalaryMin = salaryMin
-        let finalSalaryMax = salaryMax
-        let salaryCurrency = country.code === 'gb' ? 'GBP' : country.code === 'au' ? 'AUD' : country.code === 'ca' ? 'CAD' : country.code === 'de' || country.code === 'nl' ? 'EUR' : country.code === 'sg' ? 'SGD' : 'USD'
-        let salaryPredicted = false
+      const expLevel = detectExperienceLevel(title, description)
+      const visaProb = calculateVisaProbability(description, country.name)
 
-        if (!finalSalaryMin) {
-          const predicted = predictSalary(title, country.name, expLevel)
-          finalSalaryMin = predicted.min
-          finalSalaryMax = predicted.max
-          salaryCurrency = predicted.currency
-          salaryPredicted = true
-        }
+      let finalSalaryMin = salaryMin
+      let finalSalaryMax = salaryMax
+      let salaryCurrency = country.code === 'gb' ? 'GBP' : country.code === 'au' ? 'AUD' : country.code === 'ca' ? 'CAD' : 'USD'
+      let salaryPredicted = false
 
-        const datePosted = item.created ? new Date(item.created).toISOString() : undefined
-        const remoteType = detectRemoteType(`${title} ${description} ${location}`)
-
-        const jobObj = {
-          salary_min: finalSalaryMin, salary_max: finalSalaryMax, salary_currency: salaryCurrency,
-          visa_probability: visaProb, remote_type: remoteType, country: country.name,
-          company_stage: undefined, date_posted: datePosted,
-          verification_status: 'verified', is_hidden_opportunity: false
-        }
-
-        jobs.push({
-          job_id: generateJobFingerprint(company, title, country.name),
-          job_title: title,
-          company_name: company,
-          country: country.name,
-          city: location.split(',')[0]?.trim(),
-          remote_type: remoteType,
-          salary_min: finalSalaryMin, salary_max: finalSalaryMax,
-          salary_currency: salaryCurrency, salary_predicted: salaryPredicted,
-          job_description: cleanText(description).substring(0, 2000),
-          job_url: item.redirect_url || item.adref || '',
-          job_source: 'adzuna',
-          source_type: 'job_board',
-          visa_probability: visaProb,
-          visa_sponsorship: visaProb > 0.5,
-          relocation_assistance: /relocation/i.test(description),
-          quality_score: scoreJobQuality(jobObj),
-          date_posted: datePosted,
-          tech_stack: extractTechStack(description),
-          job_category: detectJobCategory(title, description),
-          experience_level: expLevel,
-          verification_status: 'verified',
-          is_hidden_opportunity: false
-        })
+      if (!finalSalaryMin) {
+        const predicted = predictSalary(title, country.name, expLevel)
+        finalSalaryMin = predicted.min
+        finalSalaryMax = predicted.max
+        salaryCurrency = predicted.currency
+        salaryPredicted = true
       }
-      await sleep(500)
+
+      const datePosted = item.created ? new Date(item.created).toISOString() : new Date().toISOString()
+      const remoteType = detectRemoteType(`${title} ${description} ${location}`)
+
+      const jobObj = {
+        salary_min: finalSalaryMin, salary_max: finalSalaryMax, salary_currency: salaryCurrency,
+        visa_probability: visaProb, remote_type: remoteType, country: country.name,
+        company_stage: undefined, date_posted: datePosted,
+        verification_status: 'verified', is_hidden_opportunity: false
+      }
+
+      jobs.push({
+        job_id: generateJobFingerprint(company, title, country.name),
+        job_title: title,
+        company_name: company,
+        country: country.name,
+        city: location.split(',')[0]?.trim(),
+        remote_type: remoteType,
+        salary_min: finalSalaryMin, salary_max: finalSalaryMax,
+        salary_currency: salaryCurrency, salary_predicted: salaryPredicted,
+        job_description: cleanText(description).substring(0, 2000),
+        job_url: item.redirect_url || item.adref || '',
+        job_source: 'adzuna',
+        source_type: 'job_board',
+        visa_probability: visaProb,
+        visa_sponsorship: visaProb > 0.5,
+        relocation_assistance: /relocation/i.test(description),
+        quality_score: scoreJobQuality(jobObj),
+        date_posted: datePosted,
+        tech_stack: extractTechStack(description),
+        job_category: detectJobCategory(title, description),
+        experience_level: expLevel,
+        verification_status: 'verified',
+        is_hidden_opportunity: false
+      })
     }
-    await sleep(1000)
   }
 
   console.log(`[Adzuna] Found ${jobs.length} jobs`)
