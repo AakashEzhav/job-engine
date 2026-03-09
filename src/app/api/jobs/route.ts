@@ -23,9 +23,6 @@ export async function GET(request: NextRequest) {
     .from('jobs')
     .select('*', { count: 'exact' })
     .neq('verification_status', 'expired')
-    .gt('expires_at', new Date().toISOString())
-    .gte('date_posted', new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString())
-
   // Search
   if (search) {
     query = query.or(`job_title.ilike.%${search}%,company_name.ilike.%${search}%,job_description.ilike.%${search}%`)
