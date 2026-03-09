@@ -23,6 +23,7 @@ export async function GET(request: NextRequest) {
     .from('jobs')
     .select('*', { count: 'exact' })
     .neq('verification_status', 'expired')
+
   // Search
   if (search) {
     query = query.or(`job_title.ilike.%${search}%,company_name.ilike.%${search}%,job_description.ilike.%${search}%`)
@@ -32,7 +33,7 @@ export async function GET(request: NextRequest) {
   if (country) query = query.ilike('country', `%${country}%`)
   if (remote === 'true') query = query.eq('remote_type', 'remote')
   if (remote === 'hybrid') query = query.eq('remote_type', 'hybrid')
-  if (visa === 'true') query = query.gte('visa_probability', 0.5)
+  if (visa === 'true') query = query.gte('visa_probability', 0.4)
   if (category) query = query.eq('job_category', category)
   if (source) query = query.eq('job_source', source)
   if (minSalary > 0) query = query.gte('salary_min', minSalary)
