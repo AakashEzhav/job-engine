@@ -65,10 +65,10 @@ const timeAgo = (dateStr?: string) => {
 }
 
 const sourceLabels: Record<string, string> = {
-  weworkremotely: 'WeWorkRemotely', remoteok: 'RemoteOK', hackernews: 'HN',
-  remotive: 'Remotive', workingnomads: 'WN', ycombinator: 'YC Jobs',
-  careers_page: 'Career Page', reddit: 'Reddit', linkedin: 'LinkedIn',
-  adzuna: 'Adzuna', arbeitnow: 'Arbeitnow'
+  adzuna: 'Adzuna', ycombinator: 'YC Jobs', remoteok: 'RemoteOK',
+  remotive: 'Remotive', arbeitnow: 'Arbeitnow', weworkremotely: 'WeWorkRemotely',
+  jobicy: 'Jobicy', swissdevjobs: 'SwissDevJobs', nodesk: 'NoDesk',
+  careers_page: 'Career Page', linkedin: 'LinkedIn'
 }
 
 const countryEmoji: Record<string, string> = {
@@ -76,7 +76,10 @@ const countryEmoji: Record<string, string> = {
   'Canada': '🇨🇦', 'Germany': '🇩🇪', 'Netherlands': '🇳🇱', 'Singapore': '🇸🇬',
   'Australia': '🇦🇺', 'Switzerland': '🇨🇭', 'Ireland': '🇮🇪', 'UAE': '🇦🇪',
   'Sweden': '🇸🇪', 'Denmark': '🇩🇰', 'Norway': '🇳🇴', 'Finland': '🇫🇮',
-  'Japan': '🇯🇵', 'South Korea': '🇰🇷', 'New Zealand': '🇳🇿'
+  'Japan': '🇯🇵', 'South Korea': '🇰🇷', 'New Zealand': '🇳🇿', 'France': '🇫🇷',
+  'Italy': '🇮🇹', 'Spain': '🇪🇸', 'Poland': '🇵🇱', 'Austria': '🇦🇹',
+  'Belgium': '🇧🇪', 'India': '🇮🇳', 'Brazil': '🇧🇷', 'Mexico': '🇲🇽',
+  'South Africa': '🇿🇦', 'Remote': '🌍', 'Europe': '🇪🇺'
 }
 
 // ============================================================
@@ -308,14 +311,22 @@ export default function Home() {
     setSavedJobs(newSaved)
   }
 
-  const COUNTRIES = ['USA', 'United Kingdom', 'Canada', 'Germany', 'Netherlands', 'Singapore', 'Australia', 'Switzerland', 'Ireland', 'UAE', 'Austria', 'Belgium', 'India', 'New Zealand', 'Remote']
+  const COUNTRIES = [
+    'USA', 'United Kingdom', 'Canada', 'Germany', 'Netherlands', 'Singapore',
+    'Australia', 'Switzerland', 'Ireland', 'UAE', 'Austria', 'Belgium',
+    'France', 'Italy', 'Spain', 'Poland', 'India', 'New Zealand',
+    'Brazil', 'Mexico', 'South Africa', 'Remote'
+  ]
   const SOURCES = [
     { id: 'adzuna', label: '🔍 Adzuna' },
     { id: 'ycombinator', label: '🚀 YC Jobs' },
     { id: 'remoteok', label: '💻 RemoteOK' },
     { id: 'remotive', label: '🌍 Remotive' },
-    { id: 'arbeitnow', label: '🇩🇪 Arbeitnow' },
+    { id: 'arbeitnow', label: '🇪🇺 Arbeitnow' },
     { id: 'weworkremotely', label: '🏠 WeWorkRemotely' },
+    { id: 'jobicy', label: '📋 Jobicy' },
+    { id: 'swissdevjobs', label: '🇨🇭 SwissDevJobs' },
+    { id: 'nodesk', label: '🖥️ NoDesk' },
   ]
   const CATEGORIES = [
     { id: 'engineering', label: '⚙️ Engineering' },
