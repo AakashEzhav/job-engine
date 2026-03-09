@@ -360,6 +360,12 @@ export default function Home() {
         <Link href="/startups" className="nav-item mt-0.5">
           <Rocket size={14} /> Startup Jobs
         </Link>
+        <Link href="/tracker" className="nav-item mt-0.5">
+          <TrendingUp size={14} /> App Tracker
+        </Link>
+        <Link href="/insights" className="nav-item mt-0.5">
+          <Star size={14} /> Insights
+        </Link>
         <Link href="/radar" className="nav-item mt-0.5">
           <Radio size={14} /> Opportunity Radar
         </Link>
