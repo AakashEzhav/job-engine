@@ -4,18 +4,13 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
-    inputs:
-      reason:
-        description: 'Reason for manual run'
-        required: false
-        default: 'Manual trigger'
 
 jobs:
   scrape:
     name: Scrape Jobs
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,22 +20,19 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
-        run: npm install --production --ignore-scripts
-
-      - name: Run scrapers
+      - name: Run direct scraper
         env:
-          APP_URL: ${{ secrets.APP_URL }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
-        run: node scripts/run-scrapers.js
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+        run: node scripts/direct-scraper.js
 
       - name: Report status
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            echo "✅ Scrape completed successfully at $(date)"
-            
+            echo "✅ Scrape completed at $(date)"
           else
             echo "❌ Scrape failed at $(date)"
           fi
-
