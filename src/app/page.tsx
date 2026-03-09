@@ -65,9 +65,10 @@ const timeAgo = (dateStr?: string) => {
 }
 
 const sourceLabels: Record<string, string> = {
-  weworkremotely: 'WWR', remoteok: 'RemoteOK', hackernews: 'HN',
-  remotive: 'Remotive', workingnomads: 'WN', ycombinator: 'YC',
-  careers_page: 'Career Page', reddit: 'Reddit', linkedin: 'LinkedIn'
+  weworkremotely: 'WeWorkRemotely', remoteok: 'RemoteOK', hackernews: 'HN',
+  remotive: 'Remotive', workingnomads: 'WN', ycombinator: 'YC Jobs',
+  careers_page: 'Career Page', reddit: 'Reddit', linkedin: 'LinkedIn',
+  adzuna: 'Adzuna', arbeitnow: 'Arbeitnow'
 }
 
 const countryEmoji: Record<string, string> = {
@@ -236,6 +237,7 @@ export default function Home() {
   const [remote, setRemote] = useState('')
   const [visa, setVisa] = useState('')
   const [category, setCategory] = useState('')
+  const [source, setSource] = useState('')
   const [sortBy, setSortBy] = useState('quality_score')
 
   // Debounced search
@@ -261,6 +263,7 @@ export default function Home() {
     if (remote) params.set('remote', remote)
     if (visa) params.set('visa', visa)
     if (category) params.set('category', category)
+    if (source) params.set('source', source)
 
     try {
       const res = await fetch(`/api/jobs?${params}`)
@@ -285,7 +288,7 @@ export default function Home() {
     } catch {}
   }, [])
 
-  useEffect(() => { fetchJobs(true) }, [search, country, remote, visa, category, sortBy])
+  useEffect(() => { fetchJobs(true) }, [search, country, remote, visa, category, source, sortBy])
   useEffect(() => { fetchJobs() }, [page])
   useEffect(() => { fetchStats() }, [])
   useEffect(() => {
@@ -305,13 +308,21 @@ export default function Home() {
     setSavedJobs(newSaved)
   }
 
-  const COUNTRIES = ['USA', 'United Kingdom', 'Canada', 'Germany', 'Netherlands', 'Singapore', 'Australia', 'Switzerland', 'Ireland', 'UAE']
+  const COUNTRIES = ['USA', 'United Kingdom', 'Canada', 'Germany', 'Netherlands', 'Singapore', 'Australia', 'Switzerland', 'Ireland', 'UAE', 'Austria', 'Belgium', 'India', 'New Zealand', 'Remote']
+  const SOURCES = [
+    { id: 'adzuna', label: '🔍 Adzuna' },
+    { id: 'ycombinator', label: '🚀 YC Jobs' },
+    { id: 'remoteok', label: '💻 RemoteOK' },
+    { id: 'remotive', label: '🌍 Remotive' },
+    { id: 'arbeitnow', label: '🇩🇪 Arbeitnow' },
+    { id: 'weworkremotely', label: '🏠 WeWorkRemotely' },
+  ]
   const CATEGORIES = [
-    { id: 'engineering', label: 'Engineering' },
-    { id: 'data-ai', label: 'Data / AI' },
-    { id: 'design', label: 'Design' },
-    { id: 'product', label: 'Product' },
-    { id: 'marketing', label: 'Marketing' },
+    { id: 'engineering', label: '⚙️ Engineering' },
+    { id: 'data-ai', label: '🤖 Data / AI' },
+    { id: 'design', label: '🎨 Design' },
+    { id: 'product', label: '📦 Product' },
+    { id: 'marketing', label: '📣 Marketing' },
   ]
 
   // Sidebar content
@@ -441,6 +452,32 @@ export default function Home() {
         </div>
       </div>
 
+      {/* Source Filter */}
+      <div className="sidebar-section">
+        <p className="sidebar-label">Job Source</p>
+        <div className="flex flex-col gap-1">
+          <button
+            onClick={() => setSource('')}
+            className={`text-left text-[13px] px-3 py-1.5 rounded-lg transition-colors ${
+              !source ? 'text-accent bg-accent/8 font-medium' : 'text-text-secondary hover:text-text-primary hover:bg-surface-3'
+            }`}
+          >
+            All Sources
+          </button>
+          {SOURCES.map(s => (
+            <button
+              key={s.id}
+              onClick={() => setSource(source === s.id ? '' : s.id)}
+              className={`text-left text-[13px] px-3 py-1.5 rounded-lg transition-colors ${
+                source === s.id ? 'text-accent bg-accent/8 font-medium' : 'text-text-secondary hover:text-text-primary hover:bg-surface-3'
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Stats */}
       {stats && (
         <div className="p-4 mt-auto border-t border-border">
@@ -543,6 +580,7 @@ export default function Home() {
                 remote === 'hybrid' && { label: '🏢 Hybrid', clear: () => setRemote('') },
                 visa && { label: '✅ Visa Likely', clear: () => setVisa('') },
                 category && { label: CATEGORIES.find(c => c.id === category)?.label || category, clear: () => setCategory('') },
+                source && { label: SOURCES.find(s => s.id === source)?.label || source, clear: () => setSource('') },
               ].filter(Boolean).map((f: any, i) => (
                 <button
                   key={i}
@@ -553,7 +591,7 @@ export default function Home() {
                 </button>
               ))}
               <button
-                onClick={() => { setCountry(''); setRemote(''); setVisa(''); setCategory(''); setSearchInput('') }}
+                onClick={() => { setCountry(''); setRemote(''); setVisa(''); setCategory(''); setSource(''); setSearchInput('') }}
                 className="text-[12px] text-text-muted hover:text-text-secondary"
               >
                 Clear all
@@ -602,7 +640,7 @@ export default function Home() {
               <p className="text-lg font-semibold text-text-primary mb-2">No jobs found</p>
               <p className="text-text-muted text-sm">Try different filters or wait for the next scrape</p>
               <button
-                onClick={() => { setCountry(''); setRemote(''); setVisa(''); setCategory(''); setSearchInput('') }}
+                onClick={() => { setCountry(''); setRemote(''); setVisa(''); setCategory(''); setSource(''); setSearchInput('') }}
                 className="mt-4 px-4 py-2 rounded-lg bg-accent text-black text-sm font-medium hover:bg-accent-bright transition-colors"
               >
                 Clear all filters
