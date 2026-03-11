@@ -3,31 +3,33 @@ import { supabase } from '@/lib/db/supabase'
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
-  const page = parseInt(searchParams.get('page') || '1')
-  const limit = parseInt(searchParams.get('limit') || '20')
+  const limit = parseInt(searchParams.get('limit') || '50')
   const hiringOnly = searchParams.get('hiring') === 'true'
+  const companyName = searchParams.get('company') || ''
 
-  const from = (page - 1) * limit
-  const to = from + limit - 1
+  // If fetching jobs for a specific company
+  if (companyName) {
+    const { data, error } = await supabase
+      .from('jobs')
+      .select('*')
+      .ilike('company_name', `%${companyName}%`)
+      .neq('verification_status', 'expired')
+      .order('date_posted', { ascending: false })
+      .limit(20)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ jobs: data || [] })
+  }
 
   let query = supabase
     .from('startups')
     .select('*', { count: 'exact' })
-    .order('launch_date', { ascending: false })
-    .range(from, to)
+    .order('jobs_count', { ascending: false })
+    .limit(limit)
 
-  if (hiringOnly) {
-    query = query.eq('has_open_roles', true)
-  }
+  if (hiringOnly) query = query.gt('jobs_count', 0)
 
   const { data, error, count } = await query
-
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  return NextResponse.json({
-    startups: data || [],
-    total: count || 0,
-    page,
-    totalPages: Math.ceil((count || 0) / limit)
-  })
+  return NextResponse.json({ startups: data || [], total: count || 0 })
 }
