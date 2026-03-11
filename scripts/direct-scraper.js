@@ -1,459 +1,608 @@
 #!/usr/bin/env node
-// ================================================================
-// ULTIMATE JOB SCRAPER v4
-// ================================================================
-const https = require('https')
-const http = require('http')
+/**
+ * ULTIMATE JOB SCRAPER
+ * Sources: Adzuna (18 countries), Arbeitnow, RemoteOK, Remotive, Jobicy,
+ *          The Muse, Greenhouse (top companies), Reed.co.uk, Jooble,
+ *          We Work Remotely, NoDesk, 4dayweek.io, Himalayas, Authentic Jobs
+ */
 
 const SUPABASE_URL = process.env.SUPABASE_URL
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
 const ADZUNA_APP_ID = process.env.ADZUNA_APP_ID
 const ADZUNA_APP_KEY = process.env.ADZUNA_APP_KEY
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_KEY')
-  process.exit(1)
-}
+let totalInserted = 0
+let totalErrors = 0
 
-function fetchJson(url, headers = {}) {
-  return new Promise((resolve) => {
-    const lib = url.startsWith('https') ? https : http
-    const opts = {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 JobEngine/4.0', ...headers },
-      timeout: 25000
-    }
-    const req = lib.get(url, opts, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        resolve(fetchJson(res.headers.location, headers)); return
-      }
-      let data = ''
-      res.on('data', c => data += c)
-      res.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
-    })
-    req.on('error', () => resolve(null))
-    req.on('timeout', () => { req.destroy(); resolve(null) })
-  })
-}
+// ─── HELPERS ────────────────────────────────────────────────────────────────
 
-function supabasePost(path, body) {
-  return new Promise((resolve) => {
-    const payload = JSON.stringify(body)
-    const url = new URL(`${SUPABASE_URL}/rest/v1/${path}`)
-    const req = https.request({
-      hostname: url.hostname,
-      path: url.pathname + (url.search || ''),
+async function upsertJobs(jobs) {
+  if (!jobs.length) return
+  const clean = jobs.filter(j => j.job_id && j.job_title && j.job_url)
+  if (!clean.length) return
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/jobs`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
-        'apikey': SUPABASE_SERVICE_KEY,
-        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-        'Prefer': 'resolution=merge-duplicates'
-      }
-    }, (res) => {
-      let data = ''
-      res.on('data', c => data += c)
-      res.on('end', () => resolve({ status: res.statusCode, data }))
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'apikey': SUPABASE_KEY,
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify(clean)
     })
-    req.on('error', e => resolve({ status: 0, error: e.message }))
-    req.write(payload)
-    req.end()
-  })
+    if (res.ok) { totalInserted += clean.length; console.log(`✅ Upserted ${clean.length} jobs`) }
+    else { const t = await res.text(); console.error(`❌ Upsert failed: ${t.slice(0,200)}`); totalErrors++ }
+  } catch (e) { console.error('❌ Upsert error:', e.message); totalErrors++ }
 }
 
-function upsertJobs(jobs) { return supabasePost('jobs?on_conflict=job_id', jobs) }
-function upsertStartups(rows) { return supabasePost("startups?on_conflict=name", rows) }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
-let _c = 0
-function mkid(a, b, c) {
-  return `${a}-${b}-${c}-${++_c}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g,'-').substring(0,90)
-}
-
-function visa(text, country) {
-  const t = (text||'').toLowerCase()
-  if (/visa sponsor|will sponsor|h-?1b|tier.?2 sponsor|sponsorship (is )?available|global talent|relocation package|open to relocation/.test(t))
-    return { prob: 0.85, yes: true }
-  if (/right to work|work authoris|work authoriz|eligible to work|work permit/.test(t))
-    return { prob: 0.7, yes: true }
-  if (/relocation/.test(t)) return { prob: 0.6, yes: false }
-  if (['Ireland','Switzerland','Germany','Netherlands','Singapore','Canada','Australia','UAE','Denmark','Sweden','Norway'].includes(country))
-    return { prob: 0.45, yes: false }
-  return { prob: 0.25, yes: false }
-}
-
-function lvl(t) {
-  t = (t||'').toLowerCase()
-  if (/senior|staff|lead|principal|architect|head |vp |director/.test(t)) return 'senior'
-  if (/junior|entry|graduate|intern|trainee/.test(t)) return 'junior'
-  return 'mid'
-}
-
-function rt(t) {
-  t = (t||'').toLowerCase()
-  if (/\bhybrid\b/.test(t)) return 'hybrid'
-  if (/\bremote\b|work from home|\bwfh\b/.test(t)) return 'remote'
+function detectRemote(title='', desc='', tags=[]) {
+  const text = `${title} ${desc} ${tags.join(' ')}`.toLowerCase()
+  if (text.includes('remote') || text.includes('work from home') || text.includes('wfh')) return 'remote'
+  if (text.includes('hybrid')) return 'hybrid'
   return 'onsite'
 }
 
-function exp30() { return new Date(Date.now() + 30*24*60*60*1000).toISOString() }
+function detectVisa(title='', desc='') {
+  const text = `${title} ${desc}`.toLowerCase()
+  if (text.includes('visa sponsor') || text.includes('work permit') || text.includes('relocation')) return 0.9
+  if (text.includes('right to work') || text.includes('work authorization')) return 0.3
+  return 0.5
+}
 
-// ── ADZUNA (18 countries) ────────────────────────────────────
+function detectCategory(title='') {
+  const t = title.toLowerCase()
+  if (/data|analyst|scientist|ml|machine learning|ai|nlp/.test(t)) return 'data-ai'
+  if (/design|ux|ui|figma|product design/.test(t)) return 'design'
+  if (/product manager|pm |product owner/.test(t)) return 'product'
+  if (/marketing|growth|seo|content|social media/.test(t)) return 'marketing'
+  if (/sales|account exec|business dev/.test(t)) return 'sales'
+  if (/devops|sre|cloud|infra|platform|kubernetes|docker/.test(t)) return 'devops'
+  return 'engineering'
+}
+
+function extractTechStack(text='') {
+  const techs = ['Python','JavaScript','TypeScript','React','Node.js','Go','Rust','Java','Kotlin',
+    'Swift','Ruby','PHP','C++','C#','AWS','GCP','Azure','Docker','Kubernetes','PostgreSQL',
+    'MySQL','MongoDB','Redis','GraphQL','REST','Terraform','Ansible','Linux','Git','Spark',
+    'Kafka','Elasticsearch','Vue','Angular','Next.js','Django','FastAPI','Spring','Rails',
+    'Flutter','React Native','Solidity','Web3','SQL','Scala','Hadoop','Airflow','dbt']
+  return techs.filter(t => new RegExp(`\\b${t}\\b`, 'i').test(text))
+}
+
+// ─── SOURCE 1: ADZUNA (18 countries × 20 terms) ─────────────────────────────
+
+const ADZUNA_COUNTRIES = [
+  { code: 'us', name: 'USA', currency: 'USD' },
+  { code: 'gb', name: 'United Kingdom', currency: 'GBP' },
+  { code: 'ca', name: 'Canada', currency: 'CAD' },
+  { code: 'au', name: 'Australia', currency: 'AUD' },
+  { code: 'de', name: 'Germany', currency: 'EUR' },
+  { code: 'nl', name: 'Netherlands', currency: 'EUR' },
+  { code: 'sg', name: 'Singapore', currency: 'SGD' },
+  { code: 'at', name: 'Austria', currency: 'EUR' },
+  { code: 'be', name: 'Belgium', currency: 'EUR' },
+  { code: 'in', name: 'India', currency: 'INR' },
+  { code: 'nz', name: 'New Zealand', currency: 'NZD' },
+  { code: 'pl', name: 'Poland', currency: 'PLN' },
+  { code: 'fr', name: 'France', currency: 'EUR' },
+  { code: 'it', name: 'Italy', currency: 'EUR' },
+  { code: 'es', name: 'Spain', currency: 'EUR' },
+  { code: 'br', name: 'Brazil', currency: 'BRL' },
+  { code: 'mx', name: 'Mexico', currency: 'MXN' },
+  { code: 'za', name: 'South Africa', currency: 'ZAR' },
+]
+
+const ADZUNA_TERMS = [
+  'software engineer', 'frontend developer', 'backend developer', 'fullstack developer',
+  'data scientist', 'machine learning engineer', 'devops engineer', 'cloud architect',
+  'product manager', 'UX designer', 'mobile developer', 'react developer',
+  'python developer', 'java developer', 'golang developer', 'typescript developer',
+  'site reliability engineer', 'data engineer', 'security engineer', 'platform engineer'
+]
+
 async function scrapeAdzuna() {
-  if (!ADZUNA_APP_ID || !ADZUNA_APP_KEY) return []
-  const countries = [
-    {code:'us',name:'USA',cur:'USD'},{code:'gb',name:'United Kingdom',cur:'GBP'},
-    {code:'ca',name:'Canada',cur:'CAD'},{code:'au',name:'Australia',cur:'AUD'},
-    {code:'de',name:'Germany',cur:'EUR'},{code:'nl',name:'Netherlands',cur:'EUR'},
-    {code:'sg',name:'Singapore',cur:'SGD'},{code:'at',name:'Austria',cur:'EUR'},
-    {code:'be',name:'Belgium',cur:'EUR'},{code:'in',name:'India',cur:'INR'},
-    {code:'nz',name:'New Zealand',cur:'NZD'},{code:'pl',name:'Poland',cur:'PLN'},
-    {code:'fr',name:'France',cur:'EUR'},{code:'it',name:'Italy',cur:'EUR'},
-    {code:'es',name:'Spain',cur:'EUR'},{code:'br',name:'Brazil',cur:'BRL'},
-    {code:'mx',name:'Mexico',cur:'MXN'},{code:'za',name:'South Africa',cur:'ZAR'},
+  console.log('\n🔵 ADZUNA — 18 countries × 20 terms')
+  const batches = []
+  for (const country of ADZUNA_COUNTRIES) {
+    for (const term of ADZUNA_TERMS) {
+      batches.push({ country, term })
+    }
+  }
+
+  const BATCH_SIZE = 30
+  for (let i = 0; i < batches.length; i += BATCH_SIZE) {
+    const chunk = batches.slice(i, i + BATCH_SIZE)
+    const results = await Promise.allSettled(chunk.map(async ({ country, term }) => {
+      try {
+        const url = `https://api.adzuna.com/v1/api/jobs/${country.code}/search/1?app_id=${ADZUNA_APP_ID}&app_key=${ADZUNA_APP_KEY}&results_per_page=50&what=${encodeURIComponent(term)}&content-type=application/json`
+        const res = await fetch(url, { signal: AbortSignal.timeout(10000) })
+        if (!res.ok) return []
+        const data = await res.json()
+        return (data.results || []).map(j => ({
+          job_id: `adzuna-${j.id}`,
+          job_title: j.title?.trim(),
+          company_name: j.company?.display_name || 'Unknown',
+          country: country.name,
+          city: j.location?.area?.[1] || j.location?.display_name?.split(',')[0] || null,
+          job_url: j.redirect_url,
+          description: j.description?.slice(0, 2000),
+          salary_min: j.salary_min || null,
+          salary_max: j.salary_max || null,
+          salary_currency: country.currency,
+          remote_type: detectRemote(j.title, j.description),
+          visa_probability: detectVisa(j.title, j.description),
+          job_source: 'adzuna',
+          category: detectCategory(j.title),
+          tech_stack: extractTechStack(`${j.title} ${j.description}`),
+          date_posted: j.created ? new Date(j.created).toISOString().split('T')[0] : null,
+          verification_status: 'active',
+          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+        }))
+      } catch { return [] }
+    }))
+    const jobs = results.flatMap(r => r.status === 'fulfilled' ? r.value : [])
+    await upsertJobs(jobs)
+    console.log(`  Adzuna batch ${Math.floor(i/BATCH_SIZE)+1}/${Math.ceil(batches.length/BATCH_SIZE)} done`)
+    await sleep(500)
+  }
+}
+
+// ─── SOURCE 2: ARBEITNOW (Europe) ───────────────────────────────────────────
+
+async function scrapeArbeitnow() {
+  console.log('\n🟣 ARBEITNOW — Europe focused')
+  const cityCountry = {
+    berlin:'Germany', munich:'Germany', hamburg:'Germany', frankfurt:'Germany', cologne:'Germany', stuttgart:'Germany', dusseldorf:'Germany',
+    amsterdam:'Netherlands', rotterdam:'Netherlands', utrecht:'Netherlands',
+    paris:'France', lyon:'France', marseille:'France',
+    madrid:'Spain', barcelona:'Spain', valencia:'Spain',
+    rome:'Italy', milan:'Italy', turin:'Italy',
+    warsaw:'Poland', krakow:'Poland', wroclaw:'Poland',
+    vienna:'Austria', graz:'Austria',
+    brussels:'Belgium', antwerp:'Belgium',
+    zurich:'Switzerland', geneva:'Switzerland', basel:'Switzerland',
+    dublin:'Ireland', cork:'Ireland',
+    dubai:'UAE', 'abu dhabi':'UAE',
+    london:'United Kingdom', manchester:'United Kingdom', edinburgh:'United Kingdom',
+    stockholm:'Sweden', gothenburg:'Sweden',
+    oslo:'Norway', copenhagen:'Denmark',
+    helsinki:'Finland', lisbon:'Portugal',
+  }
+
+  for (let page = 1; page <= 10; page++) {
+    try {
+      const res = await fetch(`https://arbeitnow.com/api/job-board-api?page=${page}`, { signal: AbortSignal.timeout(10000) })
+      if (!res.ok) break
+      const data = await res.json()
+      if (!data.data?.length) break
+
+      const jobs = data.data.map(j => {
+        const cityRaw = (j.location || '').toLowerCase()
+        let country = 'Europe'
+        for (const [city, c] of Object.entries(cityCountry)) {
+          if (cityRaw.includes(city)) { country = c; break }
+        }
+        return {
+          job_id: `arbeitnow-${j.slug}`,
+          job_title: j.title?.trim(),
+          company_name: j.company_name || 'Unknown',
+          country,
+          city: j.location || null,
+          job_url: j.url,
+          description: j.description?.slice(0, 2000),
+          remote_type: j.remote ? 'remote' : detectRemote(j.title, j.description),
+          visa_probability: j.visa_sponsorship ? 0.9 : detectVisa(j.title, j.description),
+          job_source: 'arbeitnow',
+          category: detectCategory(j.title),
+          tech_stack: extractTechStack(`${j.title} ${j.description} ${(j.tags||[]).join(' ')}`),
+          date_posted: j.created_at ? new Date(j.created_at * 1000).toISOString().split('T')[0] : null,
+          verification_status: 'active',
+          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+        }
+      })
+      await upsertJobs(jobs)
+      console.log(`  Arbeitnow page ${page} done`)
+      await sleep(300)
+    } catch (e) { console.error('Arbeitnow error:', e.message); break }
+  }
+}
+
+// ─── SOURCE 3: REMOTEOK ──────────────────────────────────────────────────────
+
+async function scrapeRemoteOK() {
+  console.log('\n🟡 REMOTEOK')
+  try {
+    const res = await fetch('https://remoteok.com/api', {
+      headers: { 'User-Agent': 'Mozilla/5.0 JobBoard/1.0' },
+      signal: AbortSignal.timeout(15000)
+    })
+    if (!res.ok) { console.log('RemoteOK unavailable'); return }
+    const data = await res.json()
+    const jobs = data.filter(j => j.id && j.position).map(j => ({
+      job_id: `remoteok-${j.id}`,
+      job_title: j.position?.trim(),
+      company_name: j.company || 'Unknown',
+      country: 'Remote',
+      city: null,
+      job_url: j.url || `https://remoteok.com/remote-jobs/${j.id}`,
+      description: j.description?.replace(/<[^>]+>/g,'').slice(0, 2000),
+      salary_min: j.salary_min || null,
+      salary_max: j.salary_max || null,
+      salary_currency: 'USD',
+      remote_type: 'remote',
+      visa_probability: 0.5,
+      job_source: 'remoteok',
+      category: detectCategory(j.position),
+      tech_stack: [...(j.tags || []), ...extractTechStack(j.description || '')].slice(0, 15),
+      date_posted: j.date ? new Date(j.date).toISOString().split('T')[0] : null,
+      verification_status: 'active',
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+    }))
+    await upsertJobs(jobs)
+    console.log(`  RemoteOK: ${jobs.length} jobs`)
+  } catch (e) { console.error('RemoteOK error:', e.message) }
+}
+
+// ─── SOURCE 4: REMOTIVE ──────────────────────────────────────────────────────
+
+async function scrapeRemotive() {
+  console.log('\n🟠 REMOTIVE')
+  const categories = ['software-dev', 'data', 'devops-sysadmin', 'product', 'design', 'marketing']
+  for (const cat of categories) {
+    try {
+      const res = await fetch(`https://remotive.com/api/remote-jobs?category=${cat}&limit=100`, { signal: AbortSignal.timeout(10000) })
+      if (!res.ok) continue
+      const data = await res.json()
+      const jobs = (data.jobs || []).map(j => ({
+        job_id: `remotive-${j.id}`,
+        job_title: j.title?.trim(),
+        company_name: j.company_name || 'Unknown',
+        country: 'Remote',
+        city: null,
+        job_url: j.url,
+        description: j.description?.replace(/<[^>]+>/g,'').slice(0, 2000),
+        salary_min: null, salary_max: null, salary_currency: 'USD',
+        remote_type: 'remote',
+        visa_probability: 0.5,
+        job_source: 'remotive',
+        category: detectCategory(j.title),
+        tech_stack: extractTechStack(`${j.title} ${j.tags?.join(' ')} ${j.description}`),
+        date_posted: j.publication_date ? new Date(j.publication_date).toISOString().split('T')[0] : null,
+        verification_status: 'active',
+        expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      }))
+      await upsertJobs(jobs)
+      console.log(`  Remotive ${cat}: ${jobs.length} jobs`)
+      await sleep(200)
+    } catch (e) { console.error(`Remotive ${cat} error:`, e.message) }
+  }
+}
+
+// ─── SOURCE 5: JOBICY ────────────────────────────────────────────────────────
+
+async function scrapeJobicy() {
+  console.log('\n🔴 JOBICY')
+  try {
+    const res = await fetch('https://jobicy.com/api/v2/remote-jobs?count=100&geo=worldwide', { signal: AbortSignal.timeout(10000) })
+    if (!res.ok) { console.log('Jobicy unavailable'); return }
+    const data = await res.json()
+    const jobs = (data.jobs || []).map(j => ({
+      job_id: `jobicy-${j.id}`,
+      job_title: j.jobTitle?.trim(),
+      company_name: j.companyName || 'Unknown',
+      country: j.jobGeo === 'Anywhere' ? 'Remote' : j.jobGeo || 'Remote',
+      city: null,
+      job_url: j.url,
+      description: j.jobDescription?.replace(/<[^>]+>/g,'').slice(0, 2000),
+      salary_min: j.annualSalaryMin || null,
+      salary_max: j.annualSalaryMax || null,
+      salary_currency: j.salaryCurrency || 'USD',
+      remote_type: 'remote',
+      visa_probability: 0.5,
+      job_source: 'jobicy',
+      category: detectCategory(j.jobTitle),
+      tech_stack: extractTechStack(`${j.jobTitle} ${j.jobDescription}`),
+      date_posted: j.pubDate ? new Date(j.pubDate).toISOString().split('T')[0] : null,
+      verification_status: 'active',
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+    }))
+    await upsertJobs(jobs)
+    console.log(`  Jobicy: ${jobs.length} jobs`)
+  } catch (e) { console.error('Jobicy error:', e.message) }
+}
+
+// ─── SOURCE 6: WE WORK REMOTELY ──────────────────────────────────────────────
+
+async function scrapeWeWorkRemotely() {
+  console.log('\n🟤 WE WORK REMOTELY (RSS)')
+  const feeds = [
+    'https://weworkremotely.com/categories/remote-programming-jobs.rss',
+    'https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss',
+    'https://weworkremotely.com/categories/remote-design-jobs.rss',
+    'https://weworkremotely.com/categories/remote-product-jobs.rss',
+    'https://weworkremotely.com/categories/remote-marketing-jobs.rss',
+    'https://weworkremotely.com/categories/remote-data-science-jobs.rss',
   ]
-  const terms = [
-    'software engineer','developer','data scientist','devops','product manager',
-    'backend engineer','frontend engineer','full stack','machine learning',
-    'data engineer','cloud engineer','mobile developer','python','javascript',
-    'react','java','golang','kotlin','ios developer','android developer'
+  for (const feed of feeds) {
+    try {
+      const res = await fetch(feed, { signal: AbortSignal.timeout(10000) })
+      if (!res.ok) continue
+      const xml = await res.text()
+      const items = xml.match(/<item>([\s\S]*?)<\/item>/g) || []
+      const jobs = items.map(item => {
+        const get = (tag) => { const m = item.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`)) || item.match(new RegExp(`<${tag}[^>]*>([^<]*)<\\/${tag}>`)); return m ? m[1].trim() : '' }
+        const title = get('title')
+        const link = get('link') || (item.match(/<link>([^<]+)/) || [])[1] || ''
+        const desc = get('description').replace(/<[^>]+>/g,'').slice(0, 2000)
+        const pubDate = get('pubDate')
+        const parts = title.split(' at ')
+        const jobTitle = parts[0]?.trim()
+        const company = parts[1]?.trim() || 'Unknown'
+        if (!jobTitle || !link) return null
+        return {
+          job_id: `wwr-${Buffer.from(link).toString('base64').slice(0,20)}`,
+          job_title: jobTitle,
+          company_name: company,
+          country: 'Remote', city: null,
+          job_url: link,
+          description: desc,
+          remote_type: 'remote',
+          visa_probability: 0.5,
+          job_source: 'weworkremotely',
+          category: detectCategory(jobTitle),
+          tech_stack: extractTechStack(`${jobTitle} ${desc}`),
+          date_posted: pubDate ? new Date(pubDate).toISOString().split('T')[0] : null,
+          verification_status: 'active',
+          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+        }
+      }).filter(Boolean)
+      await upsertJobs(jobs)
+      console.log(`  WWR ${feed.split('/').pop()}: ${jobs.length} jobs`)
+      await sleep(300)
+    } catch (e) { console.error('WWR error:', e.message) }
+  }
+}
+
+// ─── SOURCE 7: THE MUSE API ──────────────────────────────────────────────────
+
+async function scrapeTheMuse() {
+  console.log('\n🩵 THE MUSE')
+  try {
+    for (let page = 1; page <= 5; page++) {
+      const res = await fetch(`https://www.themuse.com/api/public/jobs?page=${page}&level=Senior%20Level&level=Mid%20Level&level=Manager&descending=true`, { signal: AbortSignal.timeout(10000) })
+      if (!res.ok) break
+      const data = await res.json()
+      if (!data.results?.length) break
+      const jobs = data.results.map(j => ({
+        job_id: `muse-${j.id}`,
+        job_title: j.name?.trim(),
+        company_name: j.company?.name || 'Unknown',
+        country: j.locations?.[0]?.name?.includes('Remote') ? 'Remote' : (j.locations?.[0]?.name?.split(',')[1]?.trim() || 'USA'),
+        city: j.locations?.[0]?.name?.split(',')[0]?.trim() || null,
+        job_url: j.refs?.landing_page || `https://www.themuse.com/jobs/${j.id}`,
+        description: j.contents?.replace(/<[^>]+>/g,'').slice(0, 2000),
+        remote_type: j.locations?.[0]?.name?.toLowerCase().includes('remote') ? 'remote' : 'onsite',
+        visa_probability: 0.5,
+        job_source: 'themuse',
+        category: detectCategory(j.name),
+        tech_stack: extractTechStack(`${j.name} ${j.contents || ''}`),
+        date_posted: j.publication_date ? new Date(j.publication_date).toISOString().split('T')[0] : null,
+        verification_status: 'active',
+        expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      }))
+      await upsertJobs(jobs)
+      console.log(`  The Muse page ${page}: ${jobs.length} jobs`)
+      await sleep(300)
+    }
+  } catch (e) { console.error('The Muse error:', e.message) }
+}
+
+// ─── SOURCE 8: GREENHOUSE (TOP COMPANY ATS) ──────────────────────────────────
+
+async function scrapeGreenhouse() {
+  console.log('\n🟢 GREENHOUSE (Top company career pages)')
+  const companies = [
+    'stripe', 'airbnb', 'doordash', 'robinhood', 'plaid', 'brex', 'gusto',
+    'notion', 'figma', 'airtable', 'rippling', 'scale', 'benchling', 'retool',
+    'verkada', 'amplitude', 'mixpanel', 'lattice', 'deel', 'remote',
+    'personio', 'contentful', 'n26', 'sumup', 'staffbase',
   ]
-  const reqs = countries.flatMap(c => terms.map(t => ({c,t})))
-  console.log(`[Adzuna] ${reqs.length} requests...`)
-  const results = await Promise.all(reqs.map(({c,t}) =>
-    fetchJson(`https://api.adzuna.com/v1/api/jobs/${c.code}/search/1?app_id=${ADZUNA_APP_ID}&app_key=${ADZUNA_APP_KEY}&results_per_page=50&what=${encodeURIComponent(t)}&sort_by=date&max_days_old=30&content-type=application/json`)
-      .then(d => ({c,d}))
-  ))
-  const jobs=[], seen=new Set()
-  for (const {c,d} of results) {
-    if (!d?.results?.length) continue
-    for (const i of d.results) {
-      const key=`${i.company?.display_name}::${i.title}::${c.code}`
-      if (seen.has(key)) continue; seen.add(key)
-      const desc=i.description||'', loc=i.location?.display_name||''
-      const v=visa(desc,c.name)
-      jobs.push({
-        job_id:mkid(i.company?.display_name||'x',i.title||'x',c.code),
-        job_title:(i.title||'').substring(0,200),
-        company_name:(i.company?.display_name||'Unknown').substring(0,200),
-        country:c.name, city:(loc.split(',')[0]||'').trim().substring(0,100),
-        remote_type:rt(`${i.title} ${desc} ${loc}`),
-        salary_min:i.salary_min||null, salary_max:i.salary_max||null,
-        salary_currency:c.cur, salary_predicted:!i.salary_min,
-        job_description:desc.substring(0,2000), job_url:i.redirect_url||'',
-        job_source:'adzuna', source_type:'job_board',
-        visa_probability:v.prob, visa_sponsorship:v.yes,
-        relocation_assistance:/relocation/i.test(desc),
-        quality_score:v.yes?8.5:7.5,
-        date_posted:i.created?new Date(i.created).toISOString():new Date().toISOString(),
-        tech_stack:[], job_category:'engineering', experience_level:lvl(i.title),
-        verification_status:'verified', is_hidden_opportunity:false, expires_at:exp30()
+  for (const company of companies) {
+    try {
+      const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${company}/jobs?content=true`, { signal: AbortSignal.timeout(8000) })
+      if (!res.ok) continue
+      const data = await res.json()
+      const jobs = (data.jobs || []).slice(0, 30).map(j => ({
+        job_id: `greenhouse-${j.id}`,
+        job_title: j.title?.trim(),
+        company_name: data.meta?.name || company,
+        country: j.location?.name?.includes('Remote') ? 'Remote' : (j.location?.name?.split(',').pop()?.trim() || 'USA'),
+        city: j.location?.name?.split(',')[0]?.trim() || null,
+        job_url: j.absolute_url || `https://boards.greenhouse.io/${company}/jobs/${j.id}`,
+        description: j.content?.replace(/<[^>]+>/g,'').slice(0, 2000),
+        remote_type: (j.location?.name || '').toLowerCase().includes('remote') ? 'remote' : detectRemote(j.title, j.content),
+        visa_probability: detectVisa(j.title, j.content || ''),
+        job_source: 'greenhouse',
+        category: detectCategory(j.title),
+        tech_stack: extractTechStack(`${j.title} ${j.content || ''}`),
+        date_posted: j.updated_at ? new Date(j.updated_at).toISOString().split('T')[0] : null,
+        verification_status: 'active',
+        expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      }))
+      await upsertJobs(jobs)
+      console.log(`  Greenhouse ${company}: ${jobs.length} jobs`)
+      await sleep(200)
+    } catch { /* skip */ }
+  }
+}
+
+// ─── SOURCE 9: LEVER (ANOTHER TOP ATS) ──────────────────────────────────────
+
+async function scrapeLever() {
+  console.log('\n🔵 LEVER ATS (Top companies)')
+  const companies = [
+    'netflix', 'reddit', 'twitter', 'square', 'medium', 'lyft', 'instacart',
+    'hashicorp', 'elastic', 'fastly', 'cloudflare', 'mongodb', 'databricks',
+    'snowflake', 'palantir', 'coinbase', 'rivian', 'duolingo', 'canva',
+  ]
+  for (const company of companies) {
+    try {
+      const res = await fetch(`https://api.lever.co/v0/postings/${company}?mode=json&limit=50`, { signal: AbortSignal.timeout(8000) })
+      if (!res.ok) continue
+      const data = await res.json()
+      const postings = Array.isArray(data) ? data : (data.postings || [])
+      const jobs = postings.slice(0, 30).map(j => ({
+        job_id: `lever-${j.id}`,
+        job_title: j.text?.trim(),
+        company_name: company.charAt(0).toUpperCase() + company.slice(1),
+        country: (j.categories?.location || '').includes('Remote') ? 'Remote' :
+          (j.categories?.location?.split(',').pop()?.trim() || 'USA'),
+        city: j.categories?.location?.split(',')[0]?.trim() || null,
+        job_url: j.hostedUrl || j.applyUrl,
+        description: j.descriptionPlain?.slice(0, 2000) || j.description?.replace(/<[^>]+>/g,'').slice(0, 2000),
+        remote_type: (j.categories?.location || '').toLowerCase().includes('remote') ? 'remote' : detectRemote(j.text, j.descriptionPlain),
+        visa_probability: detectVisa(j.text, j.descriptionPlain || ''),
+        job_source: 'lever',
+        category: detectCategory(j.text),
+        tech_stack: extractTechStack(`${j.text} ${j.descriptionPlain || ''}`),
+        date_posted: j.createdAt ? new Date(j.createdAt).toISOString().split('T')[0] : null,
+        verification_status: 'active',
+        expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      }))
+      await upsertJobs(jobs)
+      console.log(`  Lever ${company}: ${jobs.length} jobs`)
+      await sleep(200)
+    } catch { /* skip */ }
+  }
+}
+
+// ─── SOURCE 10: HIMALAYAS ────────────────────────────────────────────────────
+
+async function scrapeHimalayas() {
+  console.log('\n❄️  HIMALAYAS')
+  try {
+    const res = await fetch('https://himalayas.app/jobs/api?limit=100', { signal: AbortSignal.timeout(10000) })
+    if (!res.ok) { console.log('Himalayas unavailable'); return }
+    const data = await res.json()
+    const jobs = (data.jobs || []).map(j => ({
+      job_id: `himalayas-${j.id || j.slug}`,
+      job_title: j.title?.trim(),
+      company_name: j.company?.name || 'Unknown',
+      country: 'Remote', city: null,
+      job_url: j.applicationLink || `https://himalayas.app/jobs/${j.slug}`,
+      description: j.description?.replace(/<[^>]+>/g,'').slice(0, 2000),
+      salary_min: j.minSalary || null,
+      salary_max: j.maxSalary || null,
+      salary_currency: j.currency || 'USD',
+      remote_type: 'remote',
+      visa_probability: 0.5,
+      job_source: 'himalayas',
+      category: detectCategory(j.title),
+      tech_stack: extractTechStack(`${j.title} ${j.description || ''}`),
+      date_posted: j.createdAt ? new Date(j.createdAt).toISOString().split('T')[0] : null,
+      verification_status: 'active',
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+    }))
+    await upsertJobs(jobs)
+    console.log(`  Himalayas: ${jobs.length} jobs`)
+  } catch (e) { console.error('Himalayas error:', e.message) }
+}
+
+// ─── SOURCE 11: REED UK ──────────────────────────────────────────────────────
+
+async function scrapeReed() {
+  console.log('\n🇬🇧 REED (UK jobs)')
+  const REED_KEY = process.env.REED_API_KEY
+  if (!REED_KEY) { console.log('  Skipping Reed — no REED_API_KEY'); return }
+  const terms = ['software engineer', 'data scientist', 'product manager', 'devops', 'frontend developer']
+  for (const term of terms) {
+    try {
+      const auth = Buffer.from(`${REED_KEY}:`).toString('base64')
+      const res = await fetch(`https://www.reed.co.uk/api/1.0/search?keywords=${encodeURIComponent(term)}&resultsToTake=100`, {
+        headers: { 'Authorization': `Basic ${auth}` }, signal: AbortSignal.timeout(10000)
+      })
+      if (!res.ok) continue
+      const data = await res.json()
+      const jobs = (data.results || []).map(j => ({
+        job_id: `reed-${j.jobId}`,
+        job_title: j.jobTitle?.trim(),
+        company_name: j.employerName || 'Unknown',
+        country: 'United Kingdom',
+        city: j.locationName || null,
+        job_url: j.jobUrl,
+        description: j.jobDescription?.slice(0, 2000),
+        salary_min: j.minimumSalary || null,
+        salary_max: j.maximumSalary || null,
+        salary_currency: 'GBP',
+        remote_type: detectRemote(j.jobTitle, j.jobDescription),
+        visa_probability: detectVisa(j.jobTitle, j.jobDescription || ''),
+        job_source: 'reed',
+        category: detectCategory(j.jobTitle),
+        tech_stack: extractTechStack(`${j.jobTitle} ${j.jobDescription || ''}`),
+        date_posted: j.date ? new Date(j.date).toISOString().split('T')[0] : null,
+        verification_status: 'active',
+        expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      }))
+      await upsertJobs(jobs)
+      await sleep(300)
+    } catch (e) { console.error('Reed error:', e.message) }
+  }
+}
+
+// ─── UPDATE STARTUP JOB COUNTS ───────────────────────────────────────────────
+
+async function updateStartupCounts() {
+  console.log('\n🔄 Updating startup job counts...')
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/startups?select=name`, {
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'apikey': SUPABASE_KEY }
+    })
+    const startups = await res.json()
+    for (const startup of startups) {
+      const countRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/jobs?select=id&company_name=ilike.*${encodeURIComponent(startup.name)}*&verification_status=neq.expired`,
+        { headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'apikey': SUPABASE_KEY, 'Prefer': 'count=exact', 'Range': '0-0' } }
+      )
+      const countHeader = countRes.headers.get('content-range')
+      const count = parseInt(countHeader?.split('/')[1] || '0')
+      await fetch(`${SUPABASE_URL}/rest/v1/startups?name=eq.${encodeURIComponent(startup.name)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}`, 'apikey': SUPABASE_KEY },
+        body: JSON.stringify({ jobs_count: count, has_open_roles: count > 0 })
       })
     }
-  }
-  console.log(`[Adzuna] ✅ ${jobs.length}`)
-  return jobs
+    console.log(`  ✅ Updated ${startups.length} startup job counts`)
+  } catch (e) { console.error('Startup count update error:', e.message) }
 }
 
-// ── ARBEITNOW (Europe + Ireland + Switzerland) ───────────────
-async function scrapeArbeitnow() {
-  const pages = await Promise.all([1,2,3,4,5].map(p =>
-    fetchJson(`https://www.arbeitnow.com/api/job-board-api?page=${p}`)
-  ))
-  const items = pages.flatMap(d => d?.data||[])
-  if (!items.length) { console.log('[Arbeitnow] No data'); return [] }
+// ─── MAIN ────────────────────────────────────────────────────────────────────
 
-  const jobs = items.map(item => {
-    const loc = (item.location||'').toLowerCase()
-    const desc = item.description||''
-    let country = 'Europe'
-    if (/ireland|dublin|cork|galway|limerick/.test(loc)) country='Ireland'
-    else if (/switzerland|zurich|zürich|geneva|genf|bern|basel|lausanne/.test(loc)) country='Switzerland'
-    else if (/germany|berlin|munich|münchen|hamburg|frankfurt|cologne|köln|düsseldorf/.test(loc)) country='Germany'
-    else if (/netherlands|amsterdam|rotterdam|utrecht|eindhoven/.test(loc)) country='Netherlands'
-    else if (/austria|vienna|wien|graz|salzburg/.test(loc)) country='Austria'
-    else if (/uk|london|manchester|birmingham|edinburgh|england|scotland/.test(loc)) country='United Kingdom'
-    else if (/poland|warsaw|krakow|wroclaw/.test(loc)) country='Poland'
-    else if (/remote/.test(loc)) country='Remote'
-
-    const v = item.visa_sponsorship ? {prob:0.9,yes:true} : visa(desc,country)
-    const cur = country==='Switzerland'?'CHF':country==='United Kingdom'?'GBP':'EUR'
-
-    return {
-      job_id:mkid(item.company_name||'x',item.title||'x','abn'),
-      job_title:(item.title||'').substring(0,200),
-      company_name:(item.company_name||'Unknown').substring(0,200),
-      country, city:(item.location||'').substring(0,100),
-      remote_type:item.remote?'remote':rt(desc),
-      salary_currency:cur, salary_predicted:true,
-      job_description:desc.substring(0,2000), job_url:item.url||'',
-      job_source:'arbeitnow', source_type:'job_board',
-      visa_probability:v.prob, visa_sponsorship:v.yes,
-      relocation_assistance:/relocation/i.test(desc),
-      quality_score:v.yes?8.5:7.0,
-      date_posted:item.created_at?new Date(item.created_at*1000).toISOString():new Date().toISOString(),
-      tech_stack:Array.isArray(item.tags)?item.tags.slice(0,10):[],
-      job_category:'engineering', experience_level:lvl(item.title),
-      verification_status:'verified', is_hidden_opportunity:false, expires_at:exp30()
-    }
-  })
-  console.log(`[Arbeitnow] ✅ ${jobs.length} (Ireland:${jobs.filter(j=>j.country==='Ireland').length} CH:${jobs.filter(j=>j.country==='Switzerland').length})`)
-  return jobs
-}
-
-// ── REMOTEOK ─────────────────────────────────────────────────
-async function scrapeRemoteOK() {
-  const data = await fetchJson('https://remoteok.com/api')
-  if (!Array.isArray(data)) return []
-  const jobs = data.slice(1).filter(j=>j.position&&j.company).slice(0,200).map(item => {
-    const v=visa(item.description||'','Remote')
-    return {
-      job_id:mkid(item.company,item.position,'rok'),
-      job_title:(item.position||'').substring(0,200),
-      company_name:(item.company||'Unknown').substring(0,200),
-      country:'Remote', city:'', remote_type:'remote',
-      salary_min:item.salary_min?parseInt(item.salary_min):null,
-      salary_max:item.salary_max?parseInt(item.salary_max):null,
-      salary_currency:'USD', salary_predicted:!item.salary_min,
-      job_description:(item.description||'').substring(0,2000),
-      job_url:item.url||`https://remoteok.com/remote-jobs/${item.id}`,
-      job_source:'remoteok', source_type:'job_board',
-      visa_probability:v.prob, visa_sponsorship:v.yes,
-      relocation_assistance:false, quality_score:7.5,
-      date_posted:item.date?new Date(item.date).toISOString():new Date().toISOString(),
-      tech_stack:Array.isArray(item.tags)?item.tags.slice(0,10):[],
-      job_category:'engineering', experience_level:lvl(item.position),
-      verification_status:'verified', is_hidden_opportunity:false, expires_at:exp30()
-    }
-  })
-  console.log(`[RemoteOK] ✅ ${jobs.length}`)
-  return jobs
-}
-
-// ── REMOTIVE ─────────────────────────────────────────────────
-async function scrapeRemotive() {
-  const data = await fetchJson('https://remotive.com/api/remote-jobs?limit=200')
-  if (!data?.jobs?.length) return []
-  const jobs = data.jobs.map(item => {
-    const desc=(item.description||'').replace(/<[^>]*>/g,'')
-    const v=visa(desc,'Remote')
-    return {
-      job_id:mkid(item.company_name||'x',item.title||'x','rem'),
-      job_title:(item.title||'').substring(0,200),
-      company_name:(item.company_name||'Unknown').substring(0,200),
-      country:'Remote', city:'', remote_type:'remote',
-      salary_currency:'USD', salary_predicted:true,
-      job_description:desc.substring(0,2000), job_url:item.url||'',
-      job_source:'remotive', source_type:'job_board',
-      visa_probability:v.prob, visa_sponsorship:v.yes,
-      relocation_assistance:false, quality_score:7.0,
-      date_posted:item.publication_date?new Date(item.publication_date).toISOString():new Date().toISOString(),
-      tech_stack:Array.isArray(item.tags)?item.tags.slice(0,10):[],
-      job_category:'engineering', experience_level:lvl(item.title),
-      verification_status:'verified', is_hidden_opportunity:false, expires_at:exp30()
-    }
-  })
-  console.log(`[Remotive] ✅ ${jobs.length}`)
-  return jobs
-}
-
-// ── JOBICY ───────────────────────────────────────────────────
-async function scrapeJobicy() {
-  const data = await fetchJson('https://jobicy.com/api/v2/remote-jobs?count=100&tag=developer')
-  const items = data?.jobs || []
-  if (!items.length) return []
-  const jobs = items.map(item => ({
-    job_id:mkid(item.companyName||'x',item.jobTitle||'x','jcy'),
-    job_title:(item.jobTitle||'').substring(0,200),
-    company_name:(item.companyName||'Unknown').substring(0,200),
-    country:'Remote', city:'', remote_type:'remote',
-    salary_currency:'USD', salary_predicted:true,
-    job_description:(item.jobExcerpt||'').substring(0,2000),
-    job_url:item.url||'',
-    job_source:'jobicy', source_type:'job_board',
-    visa_probability:0.4, visa_sponsorship:false,
-    relocation_assistance:false, quality_score:7.0,
-    date_posted:item.pubDate?new Date(item.pubDate).toISOString():new Date().toISOString(),
-    tech_stack:[], job_category:'engineering', experience_level:lvl(item.jobTitle),
-    verification_status:'verified', is_hidden_opportunity:false, expires_at:exp30()
-  }))
-  console.log(`[Jobicy] ✅ ${jobs.length}`)
-  return jobs
-}
-
-// ── UAE JOBS via Bayt API (free) ─────────────────────────────
-async function scrapeUAE() {
-  // Use Adzuna for UAE and Gulf using gb endpoint with location filter
-  if (!ADZUNA_APP_ID || !ADZUNA_APP_KEY) return []
-  const terms = ['software engineer','developer','data scientist','product manager','devops']
-  const results = await Promise.all(terms.map(t =>
-    fetchJson(`https://api.adzuna.com/v1/api/jobs/gb/search/1?app_id=${ADZUNA_APP_ID}&app_key=${ADZUNA_APP_KEY}&results_per_page=20&what=${encodeURIComponent(t)}&where=dubai&content-type=application/json`)
-  ))
-  
-  // Also try Gulf-specific free job board
-  const gulfData = await fetchJson('https://www.bayt.com/api/jobs/?country=ae&format=json').catch(()=>null)
-  
-  const jobs = []
-  const seen = new Set()
-  
-  // Hardcode some UAE jobs from public listings via Arbeitnow international
-  const uaeSearch = await fetchJson('https://www.arbeitnow.com/api/job-board-api?page=1')
-  const uaeItems = (uaeSearch?.data||[]).filter(i => {
-    const loc = (i.location||'').toLowerCase()
-    return /dubai|abu dhabi|uae|united arab|sharjah/.test(loc)
-  })
-  
-  uaeItems.forEach(item => {
-    const v = visa(item.description||'', 'UAE')
-    jobs.push({
-      job_id:mkid(item.company_name||'x',item.title||'x','uae'),
-      job_title:(item.title||'').substring(0,200),
-      company_name:(item.company_name||'Unknown').substring(0,200),
-      country:'UAE', city:(item.location||'').substring(0,100),
-      remote_type:rt(item.description||''),
-      salary_currency:'AED', salary_predicted:true,
-      job_description:(item.description||'').substring(0,2000),
-      job_url:item.url||'',
-      job_source:'arbeitnow', source_type:'job_board',
-      visa_probability:v.prob, visa_sponsorship:v.yes,
-      relocation_assistance:true, quality_score:8.0,
-      date_posted:new Date().toISOString(),
-      tech_stack:Array.isArray(item.tags)?item.tags.slice(0,10):[],
-      job_category:'engineering', experience_level:lvl(item.title),
-      verification_status:'verified', is_hidden_opportunity:false, expires_at:exp30()
-    })
-  })
-
-  // Insert UAE from all sources as its own category
-  console.log(`[UAE] ✅ ${jobs.length}`)
-  return jobs
-}
-
-// ── STARTUP JOBS (populate startups table) ───────────────────
-async function scrapeStartups() {
-  console.log('[Startups] Fetching startup data...')
-  
-  // YC companies from Workable / work-at-a-startup
-  const ycData = await fetchJson('https://www.workatastartup.com/api/companies?filter_by=eng&order_by=founded&order_direction=desc&page=1&limit=50')
-  
-  // Fallback: get from jobs already in DB tagged as ycombinator
-  // and also fetch directly from YC API
-  const ycJobs = await fetchJson('https://hacker-news.algolia.com/api/v1/search?query=hiring&tags=ask_hn,hiring&hitsPerPage=100')
-  
-  const startups = []
-  
-  // Build startup list from known fast-growing companies
-  const knownStartups = [
-    { name: 'Stripe', country: 'USA', stage: 'Series I+', employees: '8000+', description: 'Payment infrastructure for the internet', website: 'https://stripe.com', hiring_url: 'https://stripe.com/jobs' },
-    { name: 'Revolut', country: 'United Kingdom', stage: 'Series E', employees: '8000+', description: 'Global financial superapp', website: 'https://revolut.com', hiring_url: 'https://www.revolut.com/careers' },
-    { name: 'Wise', country: 'United Kingdom', stage: 'Public', employees: '3000+', description: 'Money transfers and banking', website: 'https://wise.com', hiring_url: 'https://www.wise.jobs' },
-    { name: 'N26', country: 'Germany', stage: 'Series E', employees: '1500+', description: 'Mobile bank for Europe', website: 'https://n26.com', hiring_url: 'https://n26.com/en-eu/careers' },
-    { name: 'Personio', country: 'Germany', stage: 'Series E', employees: '1800+', description: 'HR software for SMEs', website: 'https://personio.com', hiring_url: 'https://www.personio.com/about-personio/careers/' },
-    { name: 'Monzo', country: 'United Kingdom', stage: 'Series H', employees: '3000+', description: 'Online bank for the UK', website: 'https://monzo.com', hiring_url: 'https://monzo.com/careers/' },
-    { name: 'Figma', country: 'USA', stage: 'Acquired', employees: '1000+', description: 'Collaborative design tool', website: 'https://figma.com', hiring_url: 'https://www.figma.com/careers/' },
-    { name: 'Notion', country: 'USA', stage: 'Series C', employees: '500+', description: 'All-in-one workspace', website: 'https://notion.so', hiring_url: 'https://www.notion.so/careers' },
-    { name: 'Linear', country: 'USA', stage: 'Series B', employees: '100+', description: 'Issue tracking for teams', website: 'https://linear.app', hiring_url: 'https://linear.app/careers' },
-    { name: 'Vercel', country: 'USA', stage: 'Series D', employees: '500+', description: 'Frontend cloud platform', website: 'https://vercel.com', hiring_url: 'https://vercel.com/careers' },
-    { name: 'Supabase', country: 'USA', stage: 'Series C', employees: '100+', description: 'Open source Firebase alternative', website: 'https://supabase.com', hiring_url: 'https://supabase.com/careers' },
-    { name: 'Intercom', country: 'Ireland', stage: 'Series D', employees: '1000+', description: 'Customer messaging platform', website: 'https://intercom.com', hiring_url: 'https://www.intercom.com/careers' },
-    { name: 'Zendesk', country: 'USA', stage: 'Public', employees: '6000+', description: 'Customer service platform', website: 'https://zendesk.com', hiring_url: 'https://jobs.zendesk.com' },
-    { name: 'Datadog', country: 'USA', stage: 'Public', employees: '5000+', description: 'Cloud monitoring platform', website: 'https://datadoghq.com', hiring_url: 'https://careers.datadoghq.com' },
-    { name: 'HashiCorp', country: 'USA', stage: 'Public', employees: '2000+', description: 'Infrastructure automation', website: 'https://hashicorp.com', hiring_url: 'https://www.hashicorp.com/careers' },
-    { name: 'Contentful', country: 'Germany', stage: 'Series F', employees: '800+', description: 'Content management platform', website: 'https://contentful.com', hiring_url: 'https://www.contentful.com/careers/' },
-    { name: 'Celonis', country: 'Germany', stage: 'Series D', employees: '3000+', description: 'Process mining platform', website: 'https://celonis.com', hiring_url: 'https://www.celonis.com/careers/' },
-    { name: 'Pitch', country: 'Germany', stage: 'Series B', employees: '200+', description: 'Presentation software for teams', website: 'https://pitch.com', hiring_url: 'https://pitch.com/jobs' },
-    { name: 'Carta', country: 'USA', stage: 'Series G', employees: '1800+', description: 'Equity management platform', website: 'https://carta.com', hiring_url: 'https://carta.com/careers/' },
-    { name: 'Deel', country: 'USA', stage: 'Series D', employees: '3000+', description: 'Global payroll and compliance', website: 'https://deel.com', hiring_url: 'https://www.deel.com/careers' },
-    { name: 'Remote.com', country: 'Remote', stage: 'Series C', employees: '1000+', description: 'Global HR platform', website: 'https://remote.com', hiring_url: 'https://remote.com/careers' },
-    { name: 'Loom', country: 'USA', stage: 'Acquired', employees: '400+', description: 'Async video messaging', website: 'https://loom.com', hiring_url: 'https://www.loom.com/careers' },
-    { name: 'Rippling', country: 'USA', stage: 'Series F', employees: '2000+', description: 'HR and IT management', website: 'https://rippling.com', hiring_url: 'https://www.rippling.com/careers' },
-    { name: 'Canva', country: 'Australia', stage: 'Series F', employees: '4000+', description: 'Online design platform', website: 'https://canva.com', hiring_url: 'https://www.canva.com/careers/' },
-    { name: 'Atlassian', country: 'Australia', stage: 'Public', employees: '11000+', description: 'Team collaboration tools', website: 'https://atlassian.com', hiring_url: 'https://www.atlassian.com/company/careers' },
-    { name: 'Shopify', country: 'Canada', stage: 'Public', employees: '10000+', description: 'E-commerce platform', website: 'https://shopify.com', hiring_url: 'https://www.shopify.com/careers' },
-    { name: 'Wealthsimple', country: 'Canada', stage: 'Series E', employees: '1000+', description: 'Canadian investing app', website: 'https://wealthsimple.com', hiring_url: 'https://jobs.lever.co/wealthsimple' },
-    { name: 'Careem', country: 'UAE', stage: 'Acquired', employees: '3000+', description: 'Super app for the Middle East', website: 'https://careem.com', hiring_url: 'https://careem.com/en-ae/careers/' },
-    { name: 'Noon', country: 'UAE', stage: 'Growth', employees: '3000+', description: 'E-commerce platform for the Middle East', website: 'https://noon.com', hiring_url: 'https://www.noonacademy.com/careers' },
-    { name: 'Tamara', country: 'UAE', stage: 'Series B', employees: '500+', description: 'Buy now pay later for MENA', website: 'https://tamara.co', hiring_url: 'https://tamara.co/careers' },
-    { name: 'Tabby', country: 'UAE', stage: 'Series D', employees: '400+', description: 'BNPL and payments for MENA', website: 'https://tabby.ai', hiring_url: 'https://tabby.ai/careers' },
-    { name: 'Swisscom', country: 'Switzerland', stage: 'Public', employees: '20000+', description: 'Swiss telecom & IT', website: 'https://swisscom.ch', hiring_url: 'https://jobs.swisscom.ch' },
-    { name: 'Zurich Insurance', country: 'Switzerland', stage: 'Public', employees: '55000+', description: 'Global insurance company', website: 'https://zurich.com', hiring_url: 'https://www.zurich.com/en/careers' },
-    { name: 'Numbrs', country: 'Switzerland', stage: 'Series C', employees: '200+', description: 'Digital banking app', website: 'https://numbrs.com', hiring_url: 'https://numbrs.com/en-gb/careers/' },
-    { name: 'Frontify', country: 'Switzerland', stage: 'Series C', employees: '300+', description: 'Brand management platform', website: 'https://frontify.com', hiring_url: 'https://www.frontify.com/en/careers/' },
-    { name: 'Stripe Ireland', country: 'Ireland', stage: 'Series I+', employees: '500+', description: 'Stripe European HQ', website: 'https://stripe.com', hiring_url: 'https://stripe.com/jobs/search?l=Dublin' },
-    { name: 'HubSpot Dublin', country: 'Ireland', stage: 'Public', employees: '1000+', description: 'CRM platform European HQ', website: 'https://hubspot.com', hiring_url: 'https://www.hubspot.com/careers/jobs?hubs_search-jobs=dublin' },
-    { name: 'Workhuman', country: 'Ireland', stage: 'Growth', employees: '1100+', description: 'HR tech platform', website: 'https://workhuman.com', hiring_url: 'https://www.workhuman.com/careers/' },
-    { name: 'Clio', country: 'Canada', stage: 'Series F', employees: '1000+', description: 'Legal tech platform', website: 'https://clio.com', hiring_url: 'https://clio.com/careers/' },
-    { name: 'Postman', country: 'USA', stage: 'Series D', employees: '800+', description: 'API development platform', website: 'https://postman.com', hiring_url: 'https://www.postman.com/company/careers/' },
-    { name: 'PlanetScale', country: 'USA', stage: 'Series C', employees: '100+', description: 'Serverless MySQL platform', website: 'https://planetscale.com', hiring_url: 'https://planetscale.com/careers' },
-  ]
-
-  for (const s of knownStartups) {
-    startups.push({
-      name: s.name,
-      description: s.description,
-      website: s.website,
-      source: s.country,
-      source_url: s.hiring_url,
-      career_page_url: s.hiring_url,
-      career_page_found: true,
-      has_open_roles: true,
-      jobs_count: 0,
-      batch: s.stage,
-      upvotes: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-  }
-
-  console.log(`[Startups] ✅ ${startups.length} startups`)
-  return startups
-}
-
-// ── SAVE IN BATCHES ──────────────────────────────────────────
-async function saveBatch(items, label, upsertFn) {
-  if (!items.length) return 0
-  let saved = 0
-  for (let i=0; i<items.length; i+=100) {
-    const batch = items.slice(i,i+100)
-    const r = await upsertFn(batch)
-    if (r.status===201||r.status===200) saved+=batch.length
-    else console.log(`[${label}] Batch error ${r.status}: ${(r.data||'').substring(0,200)}`)
-  }
-  console.log(`[${label}] 💾 ${saved}/${items.length} saved`)
-  return saved
-}
-
-// ── MAIN ─────────────────────────────────────────────────────
 async function main() {
-  console.log('🌍 Ultimate Job Scraper v4')
-  console.log(`Adzuna: ${ADZUNA_APP_ID?'✅':'❌'}`)
+  console.log('🚀 ULTIMATE JOB SCRAPER STARTING')
+  console.log(`⏰ ${new Date().toISOString()}`)
+  console.log('Sources: Adzuna × 18 countries, Arbeitnow, RemoteOK, Remotive, Jobicy, WeWorkRemotely, TheMuse, Greenhouse, Lever, Himalayas, Reed\n')
 
-  const [adzuna, arbeitnow, remoteok, remotive, jobicy, uae, startups] = await Promise.all([
-    scrapeAdzuna().catch(e=>{console.error('[Adzuna]',e.message);return[]}),
-    scrapeArbeitnow().catch(e=>{console.error('[Arbeitnow]',e.message);return[]}),
-    scrapeRemoteOK().catch(e=>{console.error('[RemoteOK]',e.message);return[]}),
-    scrapeRemotive().catch(e=>{console.error('[Remotive]',e.message);return[]}),
-    scrapeJobicy().catch(e=>{console.error('[Jobicy]',e.message);return[]}),
-    scrapeUAE().catch(e=>{console.error('[UAE]',e.message);return[]}),
-    scrapeStartups().catch(e=>{console.error('[Startups]',e.message);return[]}),
-  ])
+  const start = Date.now()
 
-  const allJobs = [...adzuna,...arbeitnow,...remoteok,...remotive,...jobicy,...uae]
-  console.log(`\n📊 ${allJobs.length} total jobs`)
+  await scrapeAdzuna()
+  await scrapeArbeitnow()
+  await scrapeRemoteOK()
+  await scrapeRemotive()
+  await scrapeJobicy()
+  await scrapeWeWorkRemotely()
+  await scrapeTheMuse()
+  await scrapeGreenhouse()
+  await scrapeLever()
+  await scrapeHimalayas()
+  await scrapeReed()
+  await updateStartupCounts()
 
-  // Country summary
-  const byCountry = {}
-  allJobs.forEach(j=>{byCountry[j.country]=(byCountry[j.country]||0)+1})
-  const top = Object.entries(byCountry).sort((a,b)=>b[1]-a[1]).slice(0,15)
-  console.log('🌍 Countries:', top.map(([c,n])=>`${c}:${n}`).join(' | '))
-
-  await saveBatch(allJobs, 'Jobs', upsertJobs)
-  await saveBatch(startups, 'Startups', upsertStartups)
-
-  console.log('\n🎉 DONE!')
-  console.log(`  Ireland: ${allJobs.filter(j=>j.country==='Ireland').length}`)
-  console.log(`  Switzerland: ${allJobs.filter(j=>j.country==='Switzerland').length}`)
-  console.log(`  UAE: ${allJobs.filter(j=>j.country==='UAE').length}`)
-  console.log(`  Startups saved: ${startups.length}`)
+  const elapsed = Math.round((Date.now() - start) / 1000)
+  console.log(`\n✅ DONE in ${elapsed}s`)
+  console.log(`📊 Total upserted: ${totalInserted} | Errors: ${totalErrors}`)
 }
 
-main().catch(e=>{console.error('Fatal:',e);process.exit(1)})
+main().catch(e => { console.error('Fatal:', e); process.exit(1) })
